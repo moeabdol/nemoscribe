@@ -107,3 +107,12 @@ def test_chunk_is_immutable():
     c = Chunk(samples=np.zeros(160, dtype=np.float32), start=0.0)
     with pytest.raises(FrozenInstanceError):
         c.start = 1.0
+
+
+def test_missing_ffmpeg_raises(monkeypatch):
+    monkeypatch.setenv("PATH", "")  # this tests process finds no binaries
+
+    with pytest.raises(AudioDecodeError) as exc_info:
+        load("anything.wav")
+
+    assert "ffmpeg" in str(exc_info)
