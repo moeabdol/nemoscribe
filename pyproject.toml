@@ -14,3 +14,6 @@ dev = ["pytest", "pytest-cov"]
 
 [tool.pytest.ini_options]
 markers = ["integration: needs real models"]
+
+[project.scripts]
+nemoscribe = "nemoscribe.cli:main"
