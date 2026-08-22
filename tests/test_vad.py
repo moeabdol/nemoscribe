@@ -10,11 +10,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import nemoscribe.vad as vad
+from nemoscribe import vad
 from nemoscribe.audio import SAMPLE_RATE, load
 from nemoscribe.vad import FRAME, VadError, probs_to_segments
 
-EASY = dict(min_silence_ms=96, min_speech_ms=64, max_speech_s=1000)
+EASY = {"min_silence_ms": 96, "min_speech_ms": 64, "max_speech_s": 1000}
 
 
 def test_silence_only():

@@ -32,7 +32,7 @@ def load(path: str | Path) -> np.ndarray:
         "pipe:1",
     ]
     try:
-        p = subprocess.run(cmd, capture_output=True)
+        p = subprocess.run(cmd, capture_output=True, check=False)
     except FileNotFoundError as e:
         raise AudioDecodeError("ffmpeg not found on PATH - install it") from e
     if p.returncode != 0:
