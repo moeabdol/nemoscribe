@@ -1,5 +1,7 @@
 """Batch transcription engine: audio → VAD segments → model → events."""
 
+import re
+
 import numpy as np
 
 from . import vad
@@ -7,6 +9,10 @@ from .audio import SAMPLE_RATE
 from .events import TranscriptEvent, Word
 
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+
+RUNWAY_S = 1.0  # trailing silence appended to each segment's DECODE input only
+
+LANG_TAG = re.compile(r"<([a-z]{2}-[A-Z]{2})>")
 
 
 class EngineError(Exception):
@@ -72,6 +78,20 @@ def _words_from_pieces(pieces: list[dict], offset: float) -> tuple[Word, ...]:
     return tuple(words)
 
 
+def _clamp_words(words: tuple[Word, ...], end: float) -> tuple[Word, ...]:
+    """Clip word times to the segment's real end — runway tokens carry
+    timestamps inside the appended silence, which is not part of the file."""
+    return tuple(
+        Word(text=w.text, start=min(w.start, end), end=min(w.end, end)) for w in words
+    )
+
+
+def _detect_language(raw: str) -> str:
+    """Pull the model's emitted locale tag (e.g. <ar-AR>) from a raw decode."""
+    m = LANG_TAG.search(raw)
+    return m.group(1) if m else ""
+
+
 class Transcriber:
     """Loads Nemotron once; turns audio arrays into transcript events."""
 
@@ -104,24 +124,38 @@ class Transcriber:
     def _transcribe_segment(
         self, clip: np.ndarray, offset: float, language: str
     ) -> TranscriptEvent | None:
-        inputs = self.processor(clip, sampling_rate=SAMPLE_RATE, language=language)
+        runway = np.zeros(int(RUNWAY_S * SAMPLE_RATE), dtype=np.float32)
+        inputs = self.processor(
+            np.concatenate([clip, runway]),
+            sampling_rate=SAMPLE_RATE,
+            language=language,
+        )
         inputs = inputs.to(self.model.device, dtype=self.model.dtype)
         out = self.model.generate(
             **inputs,
             return_dict_in_generate=True,
-            max_new_tokens=int(len(clip) / SAMPLE_RATE * 125) + 16,
+            max_new_tokens=int((len(clip) / SAMPLE_RATE + RUNWAY_S) * 125) + 16,
         )
+
         texts, durations = self.processor.decode(
             out.sequences, durations=out.durations, skip_special_tokens=True
         )
         text = " ".join(texts[0].split())
         if not text:
             return None
+
+        if language == "auto":
+            raw = self.processor.decode(out.sequences, skip_special_tokens=False)
+            detected = _detect_language(raw[0])
+        else:
+            detected = language
+
+        seg_end = offset + len(clip) / SAMPLE_RATE
         return TranscriptEvent(
             text=text,
             start=offset,  # segment bounds, not word
-            end=offset + len(clip) / SAMPLE_RATE,  # bounds: see docstring note
-            language=language if language != "auto" else "",
+            end=seg_end,
+            language=detected,
             source="",
-            words=_words_from_pieces(durations[0], offset),
+            words=_clamp_words(_words_from_pieces(durations[0], offset), seg_end),
         )

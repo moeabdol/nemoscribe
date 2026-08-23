@@ -3,6 +3,7 @@
 import argparse
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 
@@ -64,9 +65,16 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
             write_jsonl(events, audio_filepath=str(path)), encoding="utf-8"
         )
         base.with_suffix(".txt").write_text(write_txt(events), encoding="utf-8")
+
         print(
             f"{path}: {len(events)} segments, {duration:.0f}s audio, "
             f"RTF {work / duration:.2f} → {base}.srt / .jsonl / .txt",
             file=sys.stderr,
         )
+
+        if args.language == "auto" and events:
+            tally = Counter(e.language or "unknown" for e in events)
+            summary = ", ".join(f"{lang} {n}" for lang, n in tally.most_common())
+            print(f"{path}: detected languages: {summary}", file=sys.stderr)
+
     return status

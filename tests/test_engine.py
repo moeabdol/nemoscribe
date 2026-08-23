@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from nemoscribe.audio import load
-from nemoscribe.engine import _pad_and_clamp, _words_from_pieces
+from nemoscribe.engine import (
+    _clamp_words,
+    _detect_language,
+    _pad_and_clamp,
+    _words_from_pieces,
+)
 from nemoscribe.events import Word
 
 
@@ -93,3 +98,61 @@ def test_transcriber_hello_wav_end_to_end():
         assert e.words
         assert e.language == "en-US"
     assert all(a.end <= b.start for a, b in pairwise(events))
+
+
+def test_detect_language_finds_tag():
+    assert _detect_language("مرحبا. <ar-AR>") == "ar-AR"
+
+
+def test_detect_language_empty_when_absent():
+    assert _detect_language("Hello there. ") == ""
+
+
+def test_detect_language_ignores_malformed_tags():
+    assert _detect_language("Hello <En-us> <en> there") == ""
+
+
+def test_detect_language_requires_complete_tag():
+    assert _detect_language("maybe <en-USA> tag") == ""
+
+
+def test_clamp_words_clip_runway_timestamps():
+    words = (
+        Word(text="Hello", start=1.0, end=1.4),
+        Word(text="there.", start=1.6, end=2.7),
+    )
+
+    assert _clamp_words(words, 2.0) == (
+        Word(text="Hello", start=1.0, end=1.4),
+        Word(text="there.", start=1.6, end=2.0),
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not Path("scratch/hello.wav").exists(), reason="dev-machine fixture"
+)
+def test_auto_detects_english_hellos():
+    from nemoscribe.engine import Transcriber
+
+    events = Transcriber().transcribe(load("scratch/hello.wav"), language="auto")
+
+    assert [e.language for e in events] == ["en-US"] * 3
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not Path("scratch/arabic.wav").exists(), reason="dev-machine fixture"
+)
+def test_auto_on_arabic_gives_text_without_tags():
+    # Documents a measured model limitation (2026-08-23): short Arabic utterances
+    # get correct text but no punctuation/tag ritual, even with decode runway.
+    # If a future model version starts tagging, this test SHOULD fail — good
+    # news arriving as a red test.
+    from nemoscribe.engine import Transcriber
+
+    events = Transcriber().transcribe(load("scratch/arabic.wav"), language="auto")
+
+    assert events
+    assert all(e.language == "" for e in events)
+    assert any("\u0600" <= ch <= "\u06ff" for ch in events[0].text)

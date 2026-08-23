@@ -25,6 +25,22 @@ class ExplodingTranscriber:
         raise EngineError("no CUDA device available")
 
 
+class PolyglotFakeTranscriber:
+    def __init__(self, device=None):
+        pass
+
+    def transcribe(self, audio, *, language="en-US"):
+        mk = lambda text, lang: TranscriptEvent(
+            text=text, start=0.0, end=1.0, language=lang, source=""
+        )
+        return [
+            mk("مرحبا", "ar-AR"),
+            mk("سلام", "ar-AR"),
+            mk("Hello", "en-US"),
+            mk("??", ""),
+        ]
+
+
 def test_transcribe_command_writes_three_outputs(tmp_path, monkeypatch):
     monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
     monkeypatch.setattr(
@@ -62,3 +78,19 @@ def test_transcribe_fails_cleanly_when_engine_cannot_start(tmp_path, monkeypatch
 
     assert main(["transcribe", str(wav)]) == 2
     assert not (tmp_path / "x.srt").exists()
+
+
+def test_auto_language_prints_scorecard(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", PolyglotFakeTranscriber)
+    monkeypatch.setattr(
+        "nemoscribe.audio.load", lambda p: np.zeros(16_000, dtype=np.float32)
+    )
+    wav = tmp_path / "mix.wav"
+    wav.touch()
+
+    assert main(["transcribe", "--language", "auto", str(wav)]) == 0
+
+    err = capsys.readouterr().err
+    assert "ar-AR 2" in err
+    assert "en-US 1" in err
+    assert "unknown 1" in err
