@@ -46,11 +46,26 @@ def _flush(words: list[Word]) -> tuple[float, float, str]:
     return words[0].start, words[-1].end, " ".join(w.text for w in words)
 
 
-def write_srt(events: Sequence[TranscriptEvent], *, max_cue_chars: int = 84) -> str:
+def write_srt(
+    events: Sequence[TranscriptEvent],
+    *,
+    max_cue_chars: int = 84,
+    lead_in_s: float = 0.3,
+) -> str:
     ordered = sorted(events, key=lambda e: e.start)
     cues = [cue for e in ordered for cue in _event_cues(e, max_cue_chars)]
+
+    # presentation only: show each cue slightly before its speech so readers get
+    # a head start; also corrects RNNT emission lag (word timestamps run 0.3-1 s
+    # behind the acoustic). Never crosses the previous cue's end.
+    adjusted, prev_end = [], 0.0
+    for start, end, text in cues:
+        start = max(start - lead_in_s, prev_end, 0.0)
+        adjusted.append((start, end, text))
+        prev_end = end
+
     blocks = [
         f"{i}\n{_timestamp(start)} --> {_timestamp(end)}\n{text}\n"
-        for i, (start, end, text) in enumerate(cues, 1)
+        for i, (start, end, text) in enumerate(adjusted, 1)
     ]
     return "\n".join(blocks)

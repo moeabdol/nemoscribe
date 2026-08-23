@@ -27,6 +27,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=["cuda", "cpu"],
         help="inference device (default: auto-detect)",
     )
+    t.add_argument(
+        "--max-cue-chars",
+        type=int,
+        default=84,
+        help="max characters per SRT subtitle cue (default: 84)",
+    )
+    t.add_argument(
+        "--cue-lead-ms",
+        type=int,
+        default=300,
+        help="show each SRT cue this early, ms (default: 300)",
+    )
 
     args = parser.parse_args(argv)
     return _cmd_transcribe(args)
@@ -60,7 +72,14 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         duration = len(audio) / SAMPLE_RATE
 
         base = path.with_suffix("")
-        base.with_suffix(".srt").write_text(write_srt(events), encoding="utf-8")
+        base.with_suffix(".srt").write_text(
+            write_srt(
+                events,
+                max_cue_chars=args.max_cue_chars,
+                lead_in_s=args.cue_lead_ms / 1000,
+            ),
+            encoding="utf-8",
+        )
         base.with_suffix(".jsonl").write_text(
             write_jsonl(events, audio_filepath=str(path)), encoding="utf-8"
         )

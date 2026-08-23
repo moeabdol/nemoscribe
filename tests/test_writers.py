@@ -89,11 +89,11 @@ def test_srt_golden_output():
 
     expected = (
         "1\n"
-        "00:00:00,860 --> 00:00:01,600\n"
+        "00:00:00,560 --> 00:00:01,600\n"
         "Hello, there.\n"
         "\n"
         "2\n"
-        "00:00:02,340 --> 00:00:03,230\n"
+        "00:00:02,040 --> 00:00:03,230\n"
         "Hello, again.\n"
     )
     assert write_srt(events) == expected
@@ -129,3 +129,24 @@ def test_jsonl_keeps_arabic_readable():
 
     assert "مرحبا بالعالم" in out
     assert "\\u" not in out
+
+
+def test_srt_lead_in_shifts_cue_start_early():
+    events = [make_event(text="Hi.", start=1.0, end=2.0)]
+
+    assert "00:00:00,700 --> 00:00:02,000" in write_srt(events)
+
+
+def test_srt_lead_in_clamps_at_zero():
+    events = [make_event(text="Hi.", start=0.1, end=1.0)]
+
+    assert "00:00:00,000 --> 00:00:01,000" in write_srt(events)
+
+
+def test_srt_lead_in_never_overlaps_previous_cue():
+    events = [
+        make_event(text="One.", start=0.5, end=2.0),
+        make_event(text="Two.", start=2.1, end=3.0),
+    ]
+
+    assert "00:00:02,000 --> 00:00:03,000" in write_srt(events)
