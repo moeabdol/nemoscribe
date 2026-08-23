@@ -9,6 +9,10 @@ from .events import TranscriptEvent, Word
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 
 
+class EngineError(Exception):
+    """Raised when the transcription engine cannot run as requested."""
+
+
 def _pad_and_clamp(
     segments: list[tuple[int, int]],
     total_samples: int,
@@ -74,6 +78,12 @@ class Transcriber:
     def __init__(self, device: str | None = None):
         import torch  # deferred: 2.5 s import must not tax CLI startup
         from transformers import AutoModelForRNNT, AutoProcessor
+
+        if device == "cuda" and not torch.cuda.is_available():
+            raise EngineError(
+                "cuda requested but no CUDA device is available — "
+                "use --device cpu or omit --device to auto-detect"
+            )
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.processor = AutoProcessor.from_pretrained(MODEL_ID)
