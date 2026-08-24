@@ -10,56 +10,11 @@ import nemoscribe
 from nemoscribe.audio import SAMPLE_RATE, AudioDecodeError, Chunk, load
 
 
-def make_tone_wav(path, seconds=1.0, rate=44100):
-    """Synthesize a 440 Hz test tone; raises immediately if fixture creation fails."""
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:duration={seconds}",
-            "-ar",
-            str(rate),
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-def make_video_with_audio(path, seconds=1.0):
-    """Synthesize a tiny mp4: black frames + the same tone."""
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=black:s=64x64:d={seconds}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:duration={seconds}",
-            "-c:v",
-            "mpeg4",
-            "-shortest",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
 def test_package_imports():
     assert nemoscribe.__doc__ is not None
 
 
-def test_load_resamples_to_project_rate(tmp_path):
+def test_load_resamples_to_project_rate(tmp_path, make_tone_wav):
     wav = tmp_path / "tone.wav"
     make_tone_wav(wav, seconds=1.0, rate=44100)
 
@@ -72,7 +27,7 @@ def test_load_resamples_to_project_rate(tmp_path):
     assert peak > 0.1
 
 
-def test_load_extracts_audio_from_video(tmp_path):
+def test_load_extracts_audio_from_video(tmp_path, make_video_with_audio):
     mp4 = tmp_path / "clip.mp4"
     make_video_with_audio(mp4, seconds=1.0)
 
@@ -109,10 +64,67 @@ def test_chunk_is_immutable():
         c.start = 1.0
 
 
+def test_missing_ffprobe_raises(monkeypatch):
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(AudioDecodeError) as exc_info:
+        load("anything.wav")
+
+    assert "ffprobe" in str(exc_info.value)
+
+
 def test_missing_ffmpeg_raises(monkeypatch):
-    monkeypatch.setenv("PATH", "")  # this tests process finds no binaries
+    monkeypatch.setattr("nemoscribe.audio._channel_count", lambda _: 1)  # probe passes
+    monkeypatch.setenv("PATH", "")  # ffmpeg is absent
 
     with pytest.raises(AudioDecodeError) as exc_info:
         load("anything.wav")
 
     assert "ffmpeg" in str(exc_info)
+
+
+def test_load_downmixes_stereo_by_channel_mean(tmp_path, make_tone_wav):
+    left, right = tmp_path / "l.wav", tmp_path / "r.wav"
+    stereo = tmp_path / "s.wav"
+    make_tone_wav(left, rate=16000, frequency=440)
+    make_tone_wav(right, rate=16000, frequency=880)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=1",
+            "-filter_complex",
+            "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]",
+            "-map",
+            "[a]",
+            "-ar",
+            "16000",
+            str(stereo),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    l, r, s = load(left), load(right), load(stereo)
+    n = min(len(l), len(r), len(s))
+
+    assert np.abs(s[:n] - (l[:n] + r[:n]) / 2).max() < 1e-3
+
+
+def test_decode_failure_after_successful_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr("nemoscribe.audio._channel_count", lambda _: 1)
+    bad = tmp_path / "liar.wav"
+    bad.write_bytes(b"not audio")
+
+    with pytest.raises(AudioDecodeError) as exc_info:
+        load(bad)
+
+    assert "could not decode" in str(exc_info.value)

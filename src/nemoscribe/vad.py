@@ -119,29 +119,44 @@ def probs_to_segments(
 
 def speech_probs(audio: np.ndarray, model_path: str | Path | None = None) -> np.ndarray:
     """Per-frame speech probabilities: one float per FRAME samples of audio."""
-    import onnxruntime as ort  # deferred import: keeps CLI startup fast
-
-    if model_path is None:
-        model_path = ensure_model()
-    sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-
-    state = np.zeros((2, 1, 128), dtype=np.float32)
-    sr = np.array(SAMPLE_RATE, dtype=np.int64)
-    context = np.zeros(CONTEXT, dtype=np.float32)
-
     n = int(np.ceil(len(audio) / FRAME))
     padded = np.pad(audio, (0, n * FRAME - len(audio)))
-    probs = np.empty(n, dtype=np.float32)
-
-    for i in range(n):
-        chunk = padded[i * FRAME : (i + 1) * FRAME]
-        x = np.concatenate([context, chunk])[None, :]
-        out, state = sess.run(None, {"input": x, "state": state, "sr": sr})
-        probs[i] = np.asarray(out)[0][0]
-        context = chunk[-CONTEXT:]
-    return probs
+    return StreamVad(model_path).feed(padded)
 
 
 def segments(audio: np.ndarray, **params) -> list[tuple[int, int]]:
     """Speech segments of `audio` as (start, end) sample ranges."""
     return probs_to_segments(speech_probs(audio), **params)
+
+
+class StreamVad:
+    """Incremental silero VAD: feed arbitrary-sized chunks, get per-frame probs."""
+
+    def __init__(self, model_path: str | Path | None = None):
+        import onnxruntime as ort  # deferred: keeps CLI startup fast
+
+        self._sess = ort.InferenceSession(
+            str(model_path or ensure_model()),
+            providers=["CPUExecutionProvider"],
+        )
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context = np.zeros(CONTEXT, dtype=np.float32)
+        self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
+        self._pending = np.zeros(0, dtype=np.float32)
+
+    def feed(self, samples: np.ndarray) -> np.ndarray:
+        """Consume new samples: return probs for each COMPLETE frame formed."""
+        data = np.concatenate([self._pending, samples])
+        n = len(data) // FRAME
+        self._pending = data[n * FRAME :]
+
+        probs = np.empty(n, dtype=np.float32)
+        for i in range(n):
+            frame = data[i * FRAME : (i + 1) * FRAME]
+            x = np.concatenate([self._context, frame])[None, :]
+            out, self._state = self._sess.run(
+                None, {"input": x, "state": self._state, "sr": self._sr}
+            )
+            probs[i] = np.asarray(out)[0, 0]
+            self._context = frame[-CONTEXT:]
+        return probs

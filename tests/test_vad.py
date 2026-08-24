@@ -92,7 +92,7 @@ def test_cache_dir_respects_xdg(tmp_path, monkeypatch):
 
 def test_ensure_model_rejects_corrupt_download(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(vad, "_download", lambda url, dest: dest.write_bytes(b"junk"))
+    monkeypatch.setattr(vad, "_download", lambda _, dest: dest.write_bytes(b"junk"))
 
     with pytest.raises(VadError) as exc_info:
         vad.ensure_model()
@@ -133,7 +133,7 @@ def test_ensure_model_installs_verified_download(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     payload = b"fake model bytes"
     monkeypatch.setattr(vad, "MODEL_SHA256", hashlib.sha256(payload).hexdigest())
-    monkeypatch.setattr(vad, "_download", lambda url, dest: dest.write_bytes(payload))
+    monkeypatch.setattr(vad, "_download", lambda _, dest: dest.write_bytes(payload))
 
     path = vad.ensure_model()
 
@@ -158,3 +158,20 @@ def test_hello_wav_yields_three_speech_segments():
     segs = vad.segments(load("scratch/hello.wav"))
 
     assert len(segs) == 3
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not Path("scratch/hello.wav").exists(), reason="dev-machine fixture"
+)
+def test_streamvad_matches_batch_probs():
+    audio = load("scratch/hello.wav")
+
+    batch = vad.speech_probs(audio)
+
+    sv = vad.StreamVad()
+    fed = [sv.feed(audio[i : i + 700]) for i in range(0, len(audio), 700)]
+    streamed = np.concatenate(fed)
+
+    assert len(streamed) == len(batch) - 1 or len(streamed) == len(batch)
+    assert np.array_equal(streamed, batch[: len(streamed)])

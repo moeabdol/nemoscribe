@@ -14,41 +14,93 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # transcribe command
     t = sub.add_parser("transcribe", help="transcribe audio/video files")
+    _add_shared_args(t)
     t.add_argument("files", nargs="+", type=Path, help="audio or video files")
-    t.add_argument(
+
+    # stream command
+    s = sub.add_parser("stream", help="live-transcribe audio sources")
+    _add_shared_args(s)
+    s.add_argument(
+        "sources",
+        nargs="+",
+        help="v1: file=PATH (mic and system sources arrive in later steps)",
+    )
+    s.add_argument(
+        "--lookahead",
+        type=int,
+        default=6,
+        choices=[3, 6, 13],
+        help="right-context frames: 3=320ms 6=560ms 13=1120ms (default 6)",
+    )
+    s.add_argument(
+        "--reset-silence-ms",
+        type=int,
+        default=1000,
+        help="silence that ends an utterance (default: 1000)",
+    )
+    s.add_argument(
+        "--realtime", action="store_true", help="pace file replay to the wall clock"
+    )
+
+    args = parser.parse_args(argv)
+    commands = {
+        "transcribe": _cmd_transcribe,
+        "stream": _cmd_stream,
+    }
+    return commands[args.command](args)
+
+
+def _add_shared_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
         "--language",
         default="en-US",
         help="locale like en-US or ar-AR (default: en-US)",
     )
-    t.add_argument(
+    p.add_argument(
         "--device",
         default=None,
         choices=["cuda", "cpu"],
         help="inference device (default: auto-detect)",
     )
-    t.add_argument(
+    p.add_argument(
         "--max-cue-chars",
         type=int,
         default=84,
         help="max characters per SRT subtitle cue (default: 84)",
     )
-    t.add_argument(
+    p.add_argument(
         "--cue-lead-ms",
         type=int,
         default=300,
         help="show each SRT cue this early, ms (default: 300)",
     )
 
-    args = parser.parse_args(argv)
-    return _cmd_transcribe(args)
+
+def _write_outputs(events, path: Path, args: argparse.Namespace) -> Path:
+    from .writers import write_jsonl, write_srt, write_txt
+
+    base = path.with_suffix("")
+    base.with_suffix(".srt").write_text(
+        write_srt(
+            events,
+            max_cue_chars=args.max_cue_chars,
+            lead_in_s=args.cue_lead_ms / 1000,
+        ),
+        encoding="utf-8",
+    )
+    base.with_suffix(".jsonl").write_text(
+        write_jsonl(events, audio_filepath=str(path)), encoding="utf-8"
+    )
+    base.with_suffix(".txt").write_text(write_txt(events), encoding="utf-8")
+    return base
 
 
 def _cmd_transcribe(args: argparse.Namespace) -> int:
     from .audio import SAMPLE_RATE, AudioDecodeError, load
     from .engine import EngineError, Transcriber
     from .vad import VadError
-    from .writers import write_jsonl, write_srt, write_txt
 
     print("loading model...", file=sys.stderr)
     try:
@@ -71,20 +123,7 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
         duration = len(audio) / SAMPLE_RATE
 
-        base = path.with_suffix("")
-        base.with_suffix(".srt").write_text(
-            write_srt(
-                events,
-                max_cue_chars=args.max_cue_chars,
-                lead_in_s=args.cue_lead_ms / 1000,
-            ),
-            encoding="utf-8",
-        )
-        base.with_suffix(".jsonl").write_text(
-            write_jsonl(events, audio_filepath=str(path)), encoding="utf-8"
-        )
-        base.with_suffix(".txt").write_text(write_txt(events), encoding="utf-8")
-
+        base = _write_outputs(events, path, args)
         print(
             f"{path}: {len(events)} segments, {duration:.0f}s audio, "
             f"RTF {work / duration:.2f} → {base}.srt / .jsonl / .txt",
@@ -97,3 +136,55 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
             print(f"{path}: detected languages: {summary}", file=sys.stderr)
 
     return status
+
+
+def _cmd_stream(args: argparse.Namespace) -> int:
+    from .engine import EngineError, Transcriber
+    from .sources import file_chunks
+    from .streaming import StreamingSession
+
+    paths = []
+    for spec in args.sources:
+        if not spec.startswith("file="):
+            print(
+                f"nemoscribe: unsupported source {spec!r} — v1 streams file=PATH; "
+                "mic and system sources arrive in later version",
+                file=sys.stderr,
+            )
+            return 2
+        paths.append(Path(spec[len("file=") :]))
+    if len(paths) != 1:
+        print(
+            "nemoscribe: one source at a time for now (multi-source arrive in later version)",
+            file=sys.stderr,
+        )
+        return 2
+    path = paths[0]
+
+    print("loading model...", file=sys.stderr)
+    try:
+        transcriber = Transcriber(device=args.device)
+    except EngineError as e:
+        print(f"nemoscribe: {e}", file=sys.stderr)
+        return 2
+
+    # stream mode inverts the stdout rule: the live text IS the product
+    session = StreamingSession(
+        transcriber,
+        language=args.language,
+        lookahead=args.lookahead,
+        reset_silence_s=args.reset_silence_ms / 1000,
+        on_partial=lambda piece: print(piece, end="", flush=True),
+    )
+    for chunk in file_chunks(path, realtime=args.realtime):
+        session.feed(chunk)
+    events = session.close()
+    print(flush=True)
+
+    if not events:
+        print("nemoscribe: no speech detected", file=sys.stderr)
+        return 0
+
+    base = _write_outputs(events, path, args)
+    print(f"{path}: {len(events)} events → {base}.srt / .jsonl / .txt", file=sys.stderr)
+    return 0

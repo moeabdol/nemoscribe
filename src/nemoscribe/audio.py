@@ -13,8 +13,41 @@ class AudioDecodeError(Exception):
     """Raised when a file cannot be decoded to audio."""
 
 
+def _channel_count(path: str | Path) -> int:
+    """Ask ffprobe how many channels the file's first audio stream has."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=channels",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    try:
+        p = subprocess.run(cmd, capture_output=True, check=False)
+    except FileNotFoundError as e:
+        raise AudioDecodeError(
+            "ffprobe not found in PATH — install ffmpeg (ffprobe ships with it)"
+        ) from e
+    out = p.stdout.decode().strip()
+    if p.returncode != 0 or not out:
+        raise AudioDecodeError(
+            f"no decodable audio stream in {path}: {p.stderr.decode().strip()}"
+        )
+    return int(out.splitlines()[0])
+
+
 def load(path: str | Path) -> np.ndarray:
-    """Decode an audio/video file to mono float32 samples at SAMPLE_RATE."""
+    """Decode an audio/video file to mono float32 samples at SAMPLE_RATE.
+
+    Multi-channel audio is downmixed by exact channel mean. ffmpeg's own downmix
+    runs ~3 dB hoter, and streaming inference is gain-sensitive.
+    """
+    channels = _channel_count(path)
     cmd = [
         "ffmpeg",
         "-v",
@@ -25,8 +58,6 @@ def load(path: str | Path) -> np.ndarray:
         "f32le",
         "-acodec",
         "pcm_f32le",
-        "-ac",
-        "1",
         "-ar",
         str(SAMPLE_RATE),
         "pipe:1",
@@ -34,12 +65,22 @@ def load(path: str | Path) -> np.ndarray:
     try:
         p = subprocess.run(cmd, capture_output=True, check=False)
     except FileNotFoundError as e:
-        raise AudioDecodeError("ffmpeg not found on PATH - install it") from e
+        raise AudioDecodeError("ffmpeg not found on PATH - install ffmpeg") from e
     if p.returncode != 0:
         raise AudioDecodeError(
             f"ffmpeg could not decode {path}: {p.stderr.decode().strip()}"
         )
-    return np.frombuffer(p.stdout, dtype=np.float32).copy()
+
+    raw = np.frombuffer(p.stdout, dtype=np.float32)
+    if channels == 1:
+        return raw.copy()
+    frames = len(raw) // channels
+    return (
+        raw[: frames * channels]
+        .reshape(frames, channels)
+        .mean(axis=1)
+        .astype(np.float32)
+    )
 
 
 @dataclass(frozen=True, eq=False)

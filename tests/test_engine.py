@@ -86,10 +86,8 @@ def test_no_pieces_no_words():
 @pytest.mark.skipif(
     not Path("scratch/hello.wav").exists(), reason="dev-machine fixture"
 )
-def test_transcriber_hello_wav_end_to_end():
-    from nemoscribe.engine import Transcriber  # heavy: model load inside test
-
-    events = Transcriber().transcribe(load("scratch/hello.wav"), language="en-US")
+def test_transcriber_hello_wav_end_to_end(transcriber):
+    events = transcriber.transcribe(load("scratch/hello.wav"), language="en-US")
 
     assert len(events) == 3
     for e in events:
@@ -132,10 +130,8 @@ def test_clamp_words_clip_runway_timestamps():
 @pytest.mark.skipif(
     not Path("scratch/hello.wav").exists(), reason="dev-machine fixture"
 )
-def test_auto_detects_english_hellos():
-    from nemoscribe.engine import Transcriber
-
-    events = Transcriber().transcribe(load("scratch/hello.wav"), language="auto")
+def test_auto_detects_english_hellos(transcriber):
+    events = transcriber.transcribe(load("scratch/hello.wav"), language="auto")
 
     assert [e.language for e in events] == ["en-US"] * 3
 
@@ -144,14 +140,12 @@ def test_auto_detects_english_hellos():
 @pytest.mark.skipif(
     not Path("scratch/arabic.wav").exists(), reason="dev-machine fixture"
 )
-def test_auto_on_arabic_gives_text_without_tags():
+def test_auto_on_arabic_gives_text_without_tags(transcriber):
     # Documents a measured model limitation (2026-08-23): short Arabic utterances
     # get correct text but no punctuation/tag ritual, even with decode runway.
     # If a future model version starts tagging, this test SHOULD fail — good
     # news arriving as a red test.
-    from nemoscribe.engine import Transcriber
-
-    events = Transcriber().transcribe(load("scratch/arabic.wav"), language="auto")
+    events = transcriber.transcribe(load("scratch/arabic.wav"), language="auto")
 
     assert events
     assert all(e.language == "" for e in events)
