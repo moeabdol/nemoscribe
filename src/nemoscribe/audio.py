@@ -97,3 +97,15 @@ class Chunk:
     @property
     def end(self) -> float:
         return self.start + self.duration
+
+
+def save_wav(path: str | Path, samples: np.ndarray) -> None:
+    """Write mono float32 samples as 16-bit PCM at SAMPLE_RATE."""
+    import wave
+
+    data = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(data.tobytes())

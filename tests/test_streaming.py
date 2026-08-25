@@ -15,11 +15,15 @@ from nemoscribe.streaming import StreamingSession
 )
 def test_streaming_resets_yield_one_event_per_utterance(transcriber):
     audio = load("scratch/hello.wav")
-    session = StreamingSession(transcriber, language="en-US", reset_silence_s=0.3)
+    boundaries = []
+    session = StreamingSession(
+        transcriber, language="en-US", reset_silence_s=0.3, on_event=boundaries.append
+    )
     for i in range(0, len(audio), 1600):
         session.feed(Chunk(samples=audio[i : i + 1600], start=i / SAMPLE_RATE))
     events = session.close()
 
+    assert boundaries == events
     assert len(events) == 3
     for e in events:
         assert "hello" in e.text.lower()

@@ -1,8 +1,10 @@
 """Tests for nemoscribe.cli"""
 
+import json
+
 import numpy as np
 
-from nemoscribe.audio import AudioDecodeError
+from nemoscribe.audio import AudioDecodeError, Chunk
 from nemoscribe.cli import main
 from nemoscribe.engine import EngineError
 from nemoscribe.events import TranscriptEvent
@@ -161,3 +163,35 @@ def test_stream_warns_when_no_speech(tmp_path, monkeypatch, capsys, make_tone_wa
 
     assert main(["stream", f"file={wav}"]) == 0
     assert "no speech" in capsys.readouterr().err
+
+
+def fake_mic_chunks(**kwargs):
+    yield Chunk(samples=np.zeros(1600, dtype=np.float32), start=0.0)
+    yield Chunk(samples=np.zeros(1600, dtype=np.float32), start=0.1)
+    raise KeyboardInterrupt  # simulate Ctrl-C mid-capture
+
+
+def test_stream_mic_writes_timestamped_outputs(tmp_path, monkeypatch, make_tone_wav):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+    monkeypatch.setattr("nemoscribe.sources.mic_chunks", fake_mic_chunks)
+    monkeypatch.chdir(tmp_path)  # mic outputs land in CWD — sandbox it
+
+    assert main(["stream", "mic"]) == 0
+    assert list(tmp_path.glob("mic-*.srt"))  # timestamp stem exists
+    assert FakeStreamingSession.fed == 2
+
+
+def test_stream_mic_save_audio_writes_wav_and_manifest_pairs(tmp_path, monkeypatch):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+    monkeypatch.setattr("nemoscribe.sources.mic_chunks", fake_mic_chunks)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["stream", "mic", "--save-audio"]) == 0
+
+    wavs = list(tmp_path.glob("mic-*.wav"))
+    assert len(wavs) == 1
+    record = json.loads(next(tmp_path.glob("mic-*.jsonl")).read_text().splitlines()[0])
+    assert record["audio_filepath"].endswith(".wav")
+    assert record["audio_filepath"] == wavs[0].name

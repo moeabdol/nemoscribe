@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import nemoscribe
-from nemoscribe.audio import SAMPLE_RATE, AudioDecodeError, Chunk, load
+from nemoscribe.audio import SAMPLE_RATE, AudioDecodeError, Chunk, load, save_wav
 
 
 def test_package_imports():
@@ -128,3 +128,16 @@ def test_decode_failure_after_successful_probe(tmp_path, monkeypatch):
         load(bad)
 
     assert "could not decode" in str(exc_info.value)
+
+
+def test_save_wav_roundtrips_through_load(tmp_path):
+    original = (
+        np.sin(np.linspace(0, 440 * 2 * np.pi, SAMPLE_RATE)).astype(np.float32) * 0.5
+    )
+    wav = tmp_path / "out.wav"
+
+    save_wav(wav, original)
+    reloaded = load(wav)
+
+    assert len(reloaded) == len(original)
+    assert np.allclose(reloaded, original, atol=1e-3)  # s16 quantization headroom

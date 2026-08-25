@@ -4,6 +4,7 @@ import argparse
 import sys
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 
@@ -43,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument(
         "--realtime", action="store_true", help="pace file replay to the wall clock"
     )
+    s.add_argument(
+        "--save-audio",
+        action="store_true",
+        help="save captured mic audio as WAV (pairs with the JSONL manifest)",
+    )
 
     args = parser.parse_args(argv)
     commands = {
@@ -78,7 +84,9 @@ def _add_shared_args(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _write_outputs(events, path: Path, args: argparse.Namespace) -> Path:
+def _write_outputs(
+    events, path: Path, args: argparse.Namespace, audio_filepath: str | None = None
+) -> Path:
     from .writers import write_jsonl, write_srt, write_txt
 
     base = path.with_suffix("")
@@ -91,7 +99,8 @@ def _write_outputs(events, path: Path, args: argparse.Namespace) -> Path:
         encoding="utf-8",
     )
     base.with_suffix(".jsonl").write_text(
-        write_jsonl(events, audio_filepath=str(path)), encoding="utf-8"
+        write_jsonl(events, audio_filepath=audio_filepath or str(path)),
+        encoding="utf-8",
     )
     base.with_suffix(".txt").write_text(write_txt(events), encoding="utf-8")
     return base
@@ -139,27 +148,34 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
 
 def _cmd_stream(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    from .audio import save_wav
     from .engine import EngineError, Transcriber
-    from .sources import file_chunks
+    from .sources import file_chunks, mic_chunks
     from .streaming import StreamingSession
 
-    paths = []
-    for spec in args.sources:
-        if not spec.startswith("file="):
-            print(
-                f"nemoscribe: unsupported source {spec!r} — v1 streams file=PATH; "
-                "mic and system sources arrive in later version",
-                file=sys.stderr,
-            )
-            return 2
-        paths.append(Path(spec[len("file=") :]))
-    if len(paths) != 1:
+    if len(args.sources) != 1:
         print(
-            "nemoscribe: one source at a time for now (multi-source arrive in later version)",
+            "nemoscribe: one source at a time for now (multi-source arrives in step 9)",
             file=sys.stderr,
         )
         return 2
-    path = paths[0]
+
+    spec = args.sources[0]
+    if spec == "mic":
+        chunks = mic_chunks()
+        stem = Path(f"mic-{datetime.now():%y%m%d-%H%M%S}")  # noqa: DTZ005 — local wall-clock label, formatted and discarded; never compared
+    elif spec.startswith("file="):
+        stem = Path(spec[len("file=") :])
+        chunks = file_chunks(stem, realtime=args.realtime)
+    else:
+        print(
+            f"nemoscribe: unsupported source {spec!r} — supported: mic, file=PATH "
+            "(system audio arrives in step 9)",
+            file=sys.stderr,
+        )
+        return 2
 
     print("loading model...", file=sys.stderr)
     try:
@@ -175,9 +191,18 @@ def _cmd_stream(args: argparse.Namespace) -> int:
         lookahead=args.lookahead,
         reset_silence_s=args.reset_silence_ms / 1000,
         on_partial=lambda piece: print(piece, end="", flush=True),
+        on_event=lambda e: print(flush=True),
     )
-    for chunk in file_chunks(path, realtime=args.realtime):
-        session.feed(chunk)
+
+    captured = []
+    try:
+        for chunk in chunks:
+            session.feed(chunk)
+            if args.save_audio:
+                captured.append(chunk.samples)
+    except KeyboardInterrupt:
+        print("\nstopping...", file=sys.stderr)
+    chunks.close()
     events = session.close()
     print(flush=True)
 
@@ -185,6 +210,11 @@ def _cmd_stream(args: argparse.Namespace) -> int:
         print("nemoscribe: no speech detected", file=sys.stderr)
         return 0
 
-    base = _write_outputs(events, path, args)
-    print(f"{path}: {len(events)} events → {base}.srt / .jsonl / .txt", file=sys.stderr)
+    if args.save_audio and captured:
+        save_wav(stem.with_suffix(".wav"), np.concatenate(captured))
+
+    base = _write_outputs(
+        events, stem, args, audio_filepath=str(stem.with_suffix(".wav"))
+    )
+    print(f"{stem}: {len(events)} events → {base}.srt / .jsonl / .txt", file=sys.stderr)
     return 0

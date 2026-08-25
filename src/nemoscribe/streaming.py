@@ -28,6 +28,7 @@ class StreamingSession:
         language="en-US",
         lookahead=6,
         on_partial=None,
+        on_event=None,
         reset_silence_s=1.0,
         preroll_s=0.3,
     ):
@@ -42,6 +43,7 @@ class StreamingSession:
         self._t = transcriber
         self._language = language
         self._on_partial = on_partial or (lambda t: None)
+        self._on_event = on_event or (lambda e: None)
         self._reset_silence_s = reset_silence_s
         self._preroll_s = preroll_s
         self._vad = StreamVad()
@@ -90,6 +92,7 @@ class StreamingSession:
                 if silence_run >= self._reset_silence_s:
                     if event := gen.finish(end_hint=chunk.end - silence_run):
                         self._events.append(event)
+                        self._on_event(event)
                     gen = None
                     silence_run = 0.0
 
@@ -97,6 +100,7 @@ class StreamingSession:
             hint = last_chunk.end if last_chunk else None
             if event := gen.finish(end_hint=hint):
                 self._events.append(event)
+                self._on_event(event)
 
 
 class _Generation:
