@@ -1,4 +1,4 @@
-.PHONY: test cov lint fmt
+.PHONY: test cov lint fmt floor
 
 test:
 	pytest -v
@@ -13,3 +13,8 @@ lint:
 
 fmt:
 	ruff format src tests
+
+floor:
+	uv venv --python 3.12 /tmp/nemoscribe-floor
+	uv pip install --python /tmp/nemoscribe-floor/bin/python -e . --group dev
+	/tmp/nemoscribe-floor/bin/pytest -q
