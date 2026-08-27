@@ -1,5 +1,6 @@
 """Tests for nemoscribe.sources"""
 
+import io
 import sys
 import types
 
@@ -7,7 +8,14 @@ import numpy as np
 import pytest
 
 from nemoscribe.audio import load
-from nemoscribe.sources import _default_input_device, file_chunks, mic_chunks
+from nemoscribe.sources import (
+    SourceError,
+    _default_input_device,
+    _default_monitor,
+    file_chunks,
+    mic_chunks,
+    system_chunks,
+)
 
 
 def test_file_chunks_tile_the_file_with_timestamps(tmp_path, make_tone_wav):
@@ -72,3 +80,63 @@ def test_mic_chunks_sample_clock_and_copy(monkeypatch):
     assert [c.start for c in chunks] == [0.0, 0.1, 0.2]
     assert all(len(c.samples) == 1600 for c in chunks)
     assert [float(c.samples[0]) for c in chunks] == pytest.approx([0.1, 0.2, 0.3])
+
+
+def test_default_monitor_appends_suffix(monkeypatch):
+    stub = lambda *a, **k: types.SimpleNamespace(
+        returncode=0, stdout="alsa_output.usb\n"
+    )
+    monkeypatch.setattr("nemoscribe.sources.subprocess.run", stub)
+
+    assert _default_monitor() == "alsa_output.usb.monitor"
+
+
+def test_default_monitor_failure_raises(monkeypatch):
+    stub = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr("nemoscribe.sources.subprocess.run", stub)
+
+    with pytest.raises(SourceError):
+        _default_monitor()
+
+
+class _FakePopen:
+    last: "_FakePopen | None" = None
+
+    def __init__(self, cmd, stdout=None):
+        self.stdout = io.BytesIO(np.arange(4000, dtype=np.float32).tobytes())
+        self.terminated = False
+        self.waited = False
+        _FakePopen.last = self
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self):
+        self.waited = True
+
+
+def test_system_chunks_tile_and_teardown(monkeypatch):
+    monkeypatch.setattr("nemoscribe.sources.subprocess.Popen", _FakePopen)
+
+    # explicit name: pactl never runs
+    chunks = list(system_chunks(source_name="fake.monitor"))
+
+    joined = np.concatenate([c.samples for c in chunks])
+    assert np.array_equal(joined, np.arange(4000, dtype=np.float32))
+
+    # 2 full + 1 ragged
+    assert [c.start for c in chunks] == pytest.approx([0.0, 0.1, 0.2])
+
+    proc = _FakePopen.last
+    assert proc is not None
+    assert proc.terminated and proc.waited
+
+
+def test_default_monitor_missing_pactl_raises(monkeypatch):
+    def no_pactl(*a, **k):
+        raise FileNotFoundError("pactl")
+
+    monkeypatch.setattr("nemoscribe.sources.subprocess.run", no_pactl)
+
+    with pytest.raises(SourceError):
+        _default_monitor()

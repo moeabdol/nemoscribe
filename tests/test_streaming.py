@@ -17,7 +17,11 @@ def test_streaming_resets_yield_one_event_per_utterance(transcriber):
     audio = load("scratch/hello.wav")
     boundaries = []
     session = StreamingSession(
-        transcriber, language="en-US", reset_silence_s=0.3, on_event=boundaries.append
+        transcriber,
+        language="en-US",
+        reset_silence_s=0.3,
+        on_event=boundaries.append,
+        source="me",
     )
     for i in range(0, len(audio), 1600):
         session.feed(Chunk(samples=audio[i : i + 1600], start=i / SAMPLE_RATE))
@@ -28,6 +32,7 @@ def test_streaming_resets_yield_one_event_per_utterance(transcriber):
     for e in events:
         assert "hello" in e.text.lower()
     assert all(a.end <= b.start for a, b in pairwise(events))
+    assert all(e.source == "me" for e in events)
 
 
 @pytest.mark.integration
@@ -59,3 +64,20 @@ def test_session_rejects_unsupported_lookahead():
         StreamingSession(object(), lookahead=0)  # 0 is not supported
 
     assert "lookahead" in str(exc_info.value)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not Path("scratch/hello.wav").exists(), reason="dev-machine fixture"
+)
+def test_rotation_bounds_utterance_length(transcriber):
+    audio = load("scratch/hello.wav")
+    session = StreamingSession(
+        transcriber, language="en-US", reset_silence_s=999.0, max_utterance_s=2.0
+    )
+    for i in range(0, len(audio), 1600):
+        session.feed(Chunk(samples=audio[i : i + 1600], start=i / SAMPLE_RATE))
+    events = session.close()
+
+    assert len(events) >= 2
+    assert all(e.end - e.start <= 2.5 for e in events)

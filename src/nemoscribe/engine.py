@@ -1,6 +1,7 @@
 """Batch transcription engine: audio → VAD segments → model → events."""
 
 import re
+import threading
 
 import numpy as np
 
@@ -109,6 +110,8 @@ class Transcriber:
         self.processor = AutoProcessor.from_pretrained(MODEL_ID)
         self.model = AutoModelForRNNT.from_pretrained(MODEL_ID).to(self.device)
         self.model.eval()
+        # transformers' generate stores per-call state ON the model — never reentrant
+        self.decode_lock = threading.Lock()
 
     def transcribe(
         self, audio: np.ndarray, *, language: str = "en-US"
@@ -131,11 +134,13 @@ class Transcriber:
             language=language,
         )
         inputs = inputs.to(self.model.device, dtype=self.model.dtype)
-        out = self.model.generate(
-            **inputs,
-            return_dict_in_generate=True,
-            max_new_tokens=int((len(clip) / SAMPLE_RATE + RUNWAY_S) * 125) + 16,
-        )
+
+        with self.decode_lock:
+            out = self.model.generate(
+                **inputs,
+                return_dict_in_generate=True,
+                max_new_tokens=int((len(clip) / SAMPLE_RATE + RUNWAY_S) * 125) + 16,
+            )
 
         texts, durations = self.processor.decode(
             out.sequences, durations=out.durations, skip_special_tokens=True

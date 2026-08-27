@@ -31,6 +31,8 @@ class StreamingSession:
         on_event=None,
         reset_silence_s=1.0,
         preroll_s=0.3,
+        source="",
+        max_utterance_s=20.0,
     ):
         if lookahead not in (3, 6, 13):
             raise ValueError(
@@ -46,6 +48,8 @@ class StreamingSession:
         self._on_event = on_event or (lambda e: None)
         self._reset_silence_s = reset_silence_s
         self._preroll_s = preroll_s
+        self._source = source
+        self._max_utterance_s = max_utterance_s
         self._vad = StreamVad()
         self._raw: queue.Queue = queue.Queue()
         self._events: list[TranscriptEvent] = []
@@ -62,6 +66,7 @@ class StreamingSession:
 
     def _run(self) -> None:
         gen = None
+        gen_started = 0.0
         silence_run = 0.0
         preroll: deque = deque()
         last_chunk = None
@@ -82,7 +87,10 @@ class StreamingSession:
                 ):
                     preroll.popleft()
                 if has_speech:
-                    gen = _Generation(self._t, self._language, self._on_partial)
+                    gen = _Generation(
+                        self._t, self._language, self._on_partial, self._source
+                    )
+                    gen_started = chunk.start
                     for held in preroll:
                         gen.feed(held)
                     preroll.clear()
@@ -95,6 +103,17 @@ class StreamingSession:
                         self._on_event(event)
                     gen = None
                     silence_run = 0.0
+                elif chunk.end - gen_started >= self._max_utterance_s:
+                    # rotation: continous speech never pauses, so force-finalize and
+                    # continue mid-speech (seam may clip one word — the price of the
+                    # bounded cues and bounded lock holds)
+                    if event := gen.finish(end_hint=chunk.end):
+                        self._events.append(event)
+                        self._on_event(event)
+                    gen = _Generation(
+                        self._t, self._language, self._on_partial, self._source
+                    )
+                    gen_started = chunk.end
 
         if gen is not None:  # stream ended mid-speech: flush
             hint = last_chunk.end if last_chunk else None
@@ -106,12 +125,13 @@ class StreamingSession:
 class _Generation:
     """One decode lifetime: prime → stream → finalize into a single event."""
 
-    def __init__(self, transcriber, language, on_partial):
+    def __init__(self, transcriber, language, on_partial, source=""):
         from transformers import TextIteratorStreamer  # deferred
 
         self._t = transcriber
         self._language = language
         self._on_partial = on_partial
+        self._source = source
 
         p = self._t.processor
         self._first_n = p.num_samples_first_audio_chunk
@@ -154,7 +174,7 @@ class _Generation:
             start=self._start_time or 0.0,
             end=end_hint if end_hint is not None else self._end_time,
             language=self._language if self._language != "auto" else "",
-            source="",
+            source=self._source,
         )
 
     def _ensure(self, abs_end: int) -> bool:
@@ -214,7 +234,8 @@ class _Generation:
                 "streamer": self._streamer,
                 "max_new_tokens": 1_000_000_000,  # unbound by design: the feature stream ending stops the decode
             }
-            self._t.model.generate(**kwargs)
+            with self._t.decode_lock:
+                self._t.model.generate(**kwargs)
         finally:
             self._streamer.end()
 

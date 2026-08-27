@@ -4,6 +4,7 @@ import argparse
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -47,7 +48,18 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument(
         "--save-audio",
         action="store_true",
-        help="save captured mic audio as WAV (pairs with the JSONL manifest)",
+        help="save each source as WAV (plus a mix when multi-source; pairs with the JSONL manifests)",
+    )
+    s.add_argument(
+        "--split",
+        action="store_true",
+        help="also write srt/jsonl/txt per source (per-source manifests for fine-tuning)",
+    )
+    s.add_argument(
+        "--max-utterance-s",
+        type=float,
+        default=5.0,
+        help="force-finalize an utterance after this long without silence (continuous speakers; default: 5)",
     )
 
     args = parser.parse_args(argv)
@@ -56,6 +68,22 @@ def main(argv: list[str] | None = None) -> int:
         "stream": _cmd_stream,
     }
     return commands[args.command](args)
+
+
+def _parse_source(spec: str) -> tuple[str, str, str]:
+    """Parse a source spec into (kind, param, label).
+
+    Grammar: mic[:label] | system[:label] | file=PATH (label is the file stem).
+    """
+    if spec.startswith("file="):
+        path = spec[len("file=") :]
+        return "file", path, Path(path).stem
+    kind, _, label = spec.partition(":")
+    if kind in ("mic", "system"):
+        return kind, "", label or kind
+    raise ValueError(
+        f"unsupported source {spec!r} — supported: mic[:label], system[:label], file=PATH"
+    )
 
 
 def _add_shared_args(p: argparse.ArgumentParser) -> None:
@@ -73,19 +101,22 @@ def _add_shared_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--max-cue-chars",
         type=int,
-        default=84,
-        help="max characters per SRT subtitle cue (default: 84)",
+        default=50,
+        help="max characters per SRT subtitle cue (default: 50)",
     )
     p.add_argument(
         "--cue-lead-ms",
         type=int,
-        default=300,
-        help="show each SRT cue this early, ms (default: 300)",
+        default=500,
+        help="show each SRT cue this early, ms (default: 500)",
     )
 
 
 def _write_outputs(
-    events, path: Path, args: argparse.Namespace, audio_filepath: str | None = None
+    events,
+    path: Path,
+    args: argparse.Namespace,
+    audio_filepath: str | Mapping[str, str] | None = None,
 ) -> Path:
     from .writers import write_jsonl, write_srt, write_txt
 
@@ -148,34 +179,37 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
 
 def _cmd_stream(args: argparse.Namespace) -> int:
+    import threading
+
     import numpy as np
 
-    from .audio import save_wav
+    from .audio import AudioDecodeError, save_wav
     from .engine import EngineError, Transcriber
-    from .sources import file_chunks, mic_chunks
+    from .sources import SourceError, file_chunks, mic_chunks, system_chunks
     from .streaming import StreamingSession
 
-    if len(args.sources) != 1:
-        print(
-            "nemoscribe: one source at a time for now (multi-source arrives in step 9)",
-            file=sys.stderr,
-        )
+    try:
+        parsed = [_parse_source(spec) for spec in args.sources]
+    except ValueError as e:
+        print(f"nemoscribe: {e}", file=sys.stderr)
         return 2
 
-    spec = args.sources[0]
-    if spec == "mic":
-        chunks = mic_chunks()
-        stem = Path(f"mic-{datetime.now():%y%m%d-%H%M%S}")  # noqa: DTZ005 — local wall-clock label, formatted and discarded; never compared
-    elif spec.startswith("file="):
-        stem = Path(spec[len("file=") :])
-        chunks = file_chunks(stem, realtime=args.realtime)
-    else:
+    labels = [label for _, _, label in parsed]
+    if len(set(labels)) != len(labels):
         print(
-            f"nemoscribe: unsupported source {spec!r} — supported: mic, file=PATH "
-            "(system audio arrives in step 9)",
+            "nemoscribe: duplicate source labels — label each source uniquely, "
+            "e.g. mic:me system:them",
             file=sys.stderr,
         )
         return 2
+    multi = len(parsed) > 1
+
+    if not multi and parsed[0][0] == "file":
+        stem = Path(parsed[0][1])
+    elif not multi and parsed[0][0] == "mic":
+        stem = Path(f"mic-{datetime.now():%y%m%d-%H%M%S}")  # noqa: DTZ005 - local label
+    else:
+        stem = Path(f"stream-{datetime.now():%y%m%d-%H%M%S}")  # noqa: DTZ005 - local label
 
     print("loading model...", file=sys.stderr)
     try:
@@ -184,37 +218,119 @@ def _cmd_stream(args: argparse.Namespace) -> int:
         print(f"nemoscribe: {e}", file=sys.stderr)
         return 2
 
-    # stream mode inverts the stdout rule: the live text IS the product
-    session = StreamingSession(
-        transcriber,
-        language=args.language,
-        lookahead=args.lookahead,
-        reset_silence_s=args.reset_silence_ms / 1000,
-        on_partial=lambda piece: print(piece, end="", flush=True),
-        on_event=lambda e: print(flush=True),
-    )
+    def make_chunks(kind: str, param: str):
+        if kind == "mic":
+            return mic_chunks()
+        if kind == "system":
+            return system_chunks()
+        return file_chunks(Path(param), realtime=args.realtime)
 
-    captured = []
+    # single source streams partials live; multi prints one labeled line per event
+    def show_partial(piece: str) -> None:
+        print(piece, end="", flush=True)
+
+    def show_event(event) -> None:
+        if multi:
+            print(f"[{event.source}] {event.text}", flush=True)
+        else:
+            print(flush=True)
+
+    stop = threading.Event()
+    captures: dict[str, list] = {label: [] for label in labels}
+    sessions: list[tuple[str, StreamingSession]] = []
+    feeders: list[threading.Thread] = []
+    errors: list[str] = []
+
     try:
-        for chunk in chunks:
-            session.feed(chunk)
-            if args.save_audio:
-                captured.append(chunk.samples)
-    except KeyboardInterrupt:
+        for kind, param, label in parsed:
+            session = StreamingSession(
+                transcriber,
+                language=args.language,
+                lookahead=args.lookahead,
+                reset_silence_s=args.reset_silence_ms / 1000,
+                max_utterance_s=args.max_utterance_s,
+                source=label,
+                on_partial=(lambda p: None) if multi else show_partial,
+                on_event=show_event,
+            )
+            chunks = make_chunks(kind, param)
+            sessions.append((label, session))
+
+            def feeder(chunks=chunks, session=session, label=label):
+                try:
+                    for chunk in chunks:
+                        session.feed(chunk)
+                        if args.save_audio:
+                            captures[label].append(chunk.samples)
+                        if stop.is_set():
+                            break
+                except (AudioDecodeError, SourceError) as e:
+                    print(f"\nnemoscribe: {label}: {e}", file=sys.stderr)
+                    errors.append(label)
+                    stop.set()
+                finally:
+                    chunks.close()
+
+            feeders.append(threading.Thread(target=feeder, daemon=True))
+    except SourceError as e:
+        print(f"nemoscribe: {e}", file=sys.stderr)
+        return 2
+
+    for th in feeders:
+        th.start()
+    try:
+        for th in feeders:
+            th.join()  # file sources end on their own
+    except KeyboardInterrupt:  # live sources end here
         print("\nstopping...", file=sys.stderr)
-    chunks.close()
-    events = session.close()
+        stop.set()
+        for th in feeders:
+            th.join()
+
+    events = []
+    for _, session in sessions:
+        events.extend(session.close())
     print(flush=True)
+
+    status = 1 if errors else 0
+
+    audio_map = (
+        {label: f"{stem.name}-{label}.wav" for label in labels} if multi else None
+    )
+    if args.save_audio:
+        arrays = {}
+        for label, parts in captures.items():
+            if parts:
+                arrays[label] = np.concatenate(parts)
+                wav_name = (
+                    audio_map[label] if audio_map else stem.with_suffix(".wav").name
+                )
+                save_wav(stem.parent / wav_name, arrays[label])
+        if multi and arrays:
+            longest = max(len(a) for a in arrays.values())
+            mix = np.zeros(longest, dtype=np.float32)
+            for a in arrays.values():
+                mix[: len(a)] += a
+            save_wav(stem.with_suffix(".wav"), mix)
 
     if not events:
         print("nemoscribe: no speech detected", file=sys.stderr)
-        return 0
-
-    if args.save_audio and captured:
-        save_wav(stem.with_suffix(".wav"), np.concatenate(captured))
+        return status
 
     base = _write_outputs(
-        events, stem, args, audio_filepath=str(stem.with_suffix(".wav"))
+        events,
+        stem,
+        args,
+        audio_filepath=audio_map
+        if multi
+        else (str(stem.with_suffix(".wav")) if parsed[0][0] == "mic" else None),
     )
+    if args.split:
+        sbase = stem.with_suffix("")  # single-file stems carry ".wav"; strip once
+        for label in labels:
+            own = [e for e in events if e.source == label]
+            if own:
+                per = sbase.parent / f"{sbase.name}-{label}"
+                _write_outputs(own, per, args, audio_filepath=f"{per.name}.wav")
     print(f"{stem}: {len(events)} events → {base}.srt / .jsonl / .txt", file=sys.stderr)
-    return 0
+    return status

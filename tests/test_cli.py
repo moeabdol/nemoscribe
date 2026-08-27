@@ -3,11 +3,13 @@
 import json
 
 import numpy as np
+import pytest
 
 from nemoscribe.audio import AudioDecodeError, Chunk
-from nemoscribe.cli import main
+from nemoscribe.cli import _parse_source, main
 from nemoscribe.engine import EngineError
 from nemoscribe.events import TranscriptEvent
+from nemoscribe.sources import SourceError
 
 
 class FakeTranscriber:
@@ -99,8 +101,7 @@ def test_auto_language_prints_scorecard(tmp_path, monkeypatch, capsys):
 
 
 def test_stream_rejects_unsupported_source(capsys):
-    assert main(["stream", "mic:me"]) == 2
-
+    assert main(["stream", "webcam"]) == 2
     err = capsys.readouterr().err
     assert "unsupported source" in err
     assert "loading model" not in err
@@ -109,20 +110,28 @@ def test_stream_rejects_unsupported_source(capsys):
 class FakeStreamingSession:
     fed = 0
 
-    def __init__(self, transcriber, *, on_partial=None, **kwargs):
+    def __init__(
+        self, transcriber, *, on_partial=None, on_event=None, source="", **kwargs
+    ):
         self._on_partial = on_partial or (lambda _: None)
+        self._source = source
+        self._on_event = on_event or (lambda _: None)
         FakeStreamingSession.fed = 0
 
     def feed(self, chunk):
         FakeStreamingSession.fed += 1
 
     def close(self):
+        event = TranscriptEvent(
+            text="Hello there.",
+            start=0.0,
+            end=0.25,
+            language="en-US",
+            source=self._source,
+        )
         self._on_partial("Hello there. ")
-        return [
-            TranscriptEvent(
-                text="Hello there.", start=0.0, end=0.25, language="en-US", source=""
-            )
-        ]
+        self._on_event(event)
+        return [event]
 
 
 def test_stream_command_feeds_file_and_writes_output(
@@ -140,9 +149,11 @@ def test_stream_command_feeds_file_and_writes_output(
     assert (tmp_path / "talk.srt").exists()
 
 
-def test_stream_rejects_multiple_sources(capsys):
-    assert main(["stream", "file=a.wav", "file=b.wav"]) == 2
-    assert "one source at a time" in capsys.readouterr().err
+def test_stream_rejects_duplicate_labels(capsys):
+    assert main(["stream", "mic", "mic"]) == 2
+    err = capsys.readouterr().err
+    assert "duplicate" in err
+    assert "loading model" not in err
 
 
 def test_stream_fails_cleanly_when_engine_cannot_start(tmp_path, monkeypatch):
@@ -168,7 +179,8 @@ def test_stream_warns_when_no_speech(tmp_path, monkeypatch, capsys, make_tone_wa
 def fake_mic_chunks(**kwargs):
     yield Chunk(samples=np.zeros(1600, dtype=np.float32), start=0.0)
     yield Chunk(samples=np.zeros(1600, dtype=np.float32), start=0.1)
-    raise KeyboardInterrupt  # simulate Ctrl-C mid-capture
+    # generator ends: simulates the source closing; real Ctrl-C is main-thread
+    # only and is verified in live acceptance, not simulatable from here
 
 
 def test_stream_mic_writes_timestamped_outputs(tmp_path, monkeypatch, make_tone_wav):
@@ -195,3 +207,92 @@ def test_stream_mic_save_audio_writes_wav_and_manifest_pairs(tmp_path, monkeypat
     record = json.loads(next(tmp_path.glob("mic-*.jsonl")).read_text().splitlines()[0])
     assert record["audio_filepath"].endswith(".wav")
     assert record["audio_filepath"] == wavs[0].name
+
+
+def test_parse_source_grammar():
+    assert _parse_source("mic") == ("mic", "", "mic")
+    assert _parse_source("mic:me") == ("mic", "", "me")
+    assert _parse_source("mic:") == ("mic", "", "mic")
+    assert _parse_source("system:them") == ("system", "", "them")
+    assert _parse_source("file=talk.wav") == ("file", "talk.wav", "talk")
+    assert _parse_source("file=/a/b/clip.mp4") == ("file", "/a/b/clip.mp4", "clip")
+
+
+def test_parse_source_rejects_unknown_kinds():
+    with pytest.raises(ValueError) as exc_info:
+        _parse_source("webcam")
+
+    assert "unsupported source" in str(exc_info.value)
+
+
+def test_stream_two_file_sources_merge_and_split(tmp_path, monkeypatch, make_tone_wav):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+    monkeypatch.chdir(tmp_path)
+    make_tone_wav(tmp_path / "alpha.wav", seconds=0.25, rate=16_000)
+    make_tone_wav(tmp_path / "beta.wav", seconds=0.25, rate=16_000)
+
+    assert (
+        main(["stream", "file=alpha.wav", "file=beta.wav", "--split", "--save-audio"])
+        == 0
+    )
+
+    stem = min(tmp_path.glob("stream-*.jsonl"), key=lambda p: len(p.name))
+    sources = {json.loads(line)["source"] for line in stem.read_text().splitlines()}
+    assert sources == {"alpha", "beta"}
+    assert next(tmp_path.glob("stream-*-alpha.wav"), None) is not None
+    assert next(tmp_path.glob("stream-*-beta.wav"), None) is not None
+    assert stem.with_suffix(".wav").exists()  # the mix — same basename, mpv auto-pairs
+
+    for label in ("alpha", "beta"):
+        for ext in (".srt", ".jsonl", ".txt"):
+            assert stem.with_name(f"{stem.stem}-{label}{ext}").exists()
+
+    # per-source manifest points at its own stem wav (parse, don't just glob)
+    line = json.loads(
+        stem.with_name(f"{stem.stem}-alpha.jsonl").read_text().splitlines()[0]
+    )
+    assert line["audio_filepath"] == f"{stem.stem}-alpha.wav"
+    assert line["source"] == "alpha"
+
+
+def fake_system_chunks(**kwargs):
+    yield Chunk(samples=np.zeros(1600, dtype=np.float32), start=0.0)
+
+
+def test_stream_system_and_file_sources_merge(tmp_path, monkeypatch, make_tone_wav):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+    monkeypatch.setattr("nemoscribe.sources.system_chunks", fake_system_chunks)
+    monkeypatch.chdir(tmp_path)
+    make_tone_wav(tmp_path / "clip.wav", seconds=0.25, rate=16_000)
+
+    assert main(["stream", "system:them", "file=clip.wav"]) == 0
+
+    stem = next(tmp_path.glob("stream-*.jsonl"))
+    sources = {json.loads(l)["source"] for l in stem.read_text().splitlines()}
+    assert sources == {"them", "clip"}
+
+
+def test_stream_dead_source_fails_fast_with_status_1(
+    tmp_path, monkeypatch, make_tone_wav
+):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+    monkeypatch.chdir(tmp_path)
+    make_tone_wav(tmp_path / "good.wav", seconds=0.25, rate=16_000)
+
+    assert main(["stream", "file=good.wav", "file=missing.wav"]) == 1
+
+
+def test_stream_system_source_setup_failure_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", FakeTranscriber)
+    monkeypatch.setattr("nemoscribe.streaming.StreamingSession", FakeStreamingSession)
+
+    def no_sink(**kwargs):
+        raise SourceError("no default sink")
+
+    monkeypatch.setattr("nemoscribe.sources.system_chunks", no_sink)
+
+    assert main(["stream", "system"]) == 2
+    assert "no default sink" in capsys.readouterr().err

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from nemoscribe.events import TranscriptEvent, Word
 from nemoscribe.writers import write_txt
 from nemoscribe.writers.jsonl import write_jsonl
@@ -150,3 +152,24 @@ def test_srt_lead_in_never_overlaps_previous_cue():
     ]
 
     assert "00:00:02,000 --> 00:00:03,000" in write_srt(events)
+
+
+def test_jsonl_resolves_audio_path_per_source():
+    events = [
+        make_event(text="hi.", start=0.0, end=1.0, source="me"),
+        make_event(text="yo.", start=2.0, end=3.0, source="them"),
+    ]
+    paths = {"me": "meeting-me.wav", "them": "meeting-them.wav"}
+
+    lines = write_jsonl(events, audio_filepath=paths).splitlines()
+    records = [json.loads(line) for line in lines]
+
+    assert records[0]["audio_filepath"] == "meeting-me.wav"
+    assert records[1]["audio_filepath"] == "meeting-them.wav"
+
+
+def test_jsonl_missing_label_in_path_map_is_loud():
+    events = [make_event(source="mystery")]
+
+    with pytest.raises(KeyError):
+        write_jsonl(events, audio_filepath={"me": "a.wav"})
