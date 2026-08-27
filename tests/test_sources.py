@@ -83,16 +83,18 @@ def test_mic_chunks_sample_clock_and_copy(monkeypatch):
 
 
 def test_default_monitor_appends_suffix(monkeypatch):
-    stub = lambda *a, **k: types.SimpleNamespace(
-        returncode=0, stdout="alsa_output.usb\n"
-    )
+    def stub(*a, **k):
+        return types.SimpleNamespace(returncode=0, stdout="alsa_output.usb\n")
+
     monkeypatch.setattr("nemoscribe.sources.subprocess.run", stub)
 
     assert _default_monitor() == "alsa_output.usb.monitor"
 
 
 def test_default_monitor_failure_raises(monkeypatch):
-    stub = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="")
+    def stub(*a, **k):
+        return types.SimpleNamespace(returncode=1, stdout="")
+
     monkeypatch.setattr("nemoscribe.sources.subprocess.run", stub)
 
     with pytest.raises(SourceError):

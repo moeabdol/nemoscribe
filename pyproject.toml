@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Multi-lingual CLI transcriber (batch + live streaming) built on NVIDIA Nemotron 3.5 ASR"
 requires-python = ">=3.12"
 dependencies = [
+	"librosa",
+	"numpy>=1.26",
 	"torch>=2.13",
 	"transformers>=5.13",
 	"onnxruntime",
@@ -15,7 +17,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov"]
+dev = ["pytest", "pytest-cov", "ruff", "pyright"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "C4", "DTZ", "RUF"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 markers = ["integration: needs real models"]
@@ -23,3 +33,6 @@ addopts = "--strict-markers"
 
 [project.scripts]
 nemoscribe = "nemoscribe.cli:main"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "tests", "README.md"]

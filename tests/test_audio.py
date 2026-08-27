@@ -61,7 +61,7 @@ def test_chunk_time_arithmetic():
 def test_chunk_is_immutable():
     c = Chunk(samples=np.zeros(160, dtype=np.float32), start=0.0)
     with pytest.raises(FrozenInstanceError):
-        c.start = 1.0
+        c.start = 1.0  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_missing_ffprobe_raises(monkeypatch):
@@ -113,10 +113,10 @@ def test_load_downmixes_stereo_by_channel_mean(tmp_path, make_tone_wav):
         capture_output=True,
     )
 
-    l, r, s = load(left), load(right), load(stereo)
-    n = min(len(l), len(r), len(s))
+    la, ra, sa = load(left), load(right), load(stereo)
+    n = min(len(la), len(ra), len(sa))
 
-    assert np.abs(s[:n] - (l[:n] + r[:n]) / 2).max() < 1e-3
+    assert np.abs(sa[:n] - (la[:n] + ra[:n]) / 2).max() < 1e-3
 
 
 def test_decode_failure_after_successful_probe(tmp_path, monkeypatch):

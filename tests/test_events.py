@@ -1,6 +1,6 @@
 """Tests for nemoscribe.events"""
 
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -40,4 +40,4 @@ def test_immutable_and_words_default():
 
     assert e.words == ()
     with pytest.raises(FrozenInstanceError):
-        e.text = "edited"
+        e.text = "edited"  # pyright: ignore[reportAttributeAccessIssue]

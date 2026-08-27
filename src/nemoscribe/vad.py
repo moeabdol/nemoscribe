@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -21,8 +22,11 @@ class VadError(Exception):
 
 
 def _cache_dir() -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return base / "nemoscribe"
+    if xdg := os.environ.get("XDG_CACHE_HOME"):
+        return Path(xdg) / "nemoscribe"
+    if sys.platform == "win32" and (local := os.environ.get("LOCALAPPDATA")):
+        return Path(local) / "nemoscribe"
+    return Path.home() / ".cache" / "nemoscribe"
 
 
 def _download(url: str, dest: Path) -> None:  # pragma: no cover

@@ -5,6 +5,7 @@ min_speech_ms=64 → 2 frames; one frame = 32 ms = 512 samples.
 """
 
 import hashlib
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -175,3 +176,25 @@ def test_streamvad_matches_batch_probs():
 
     assert len(streamed) == len(batch) - 1 or len(streamed) == len(batch)
     assert np.array_equal(streamed, batch[: len(streamed)])
+
+
+def test_cache_dir_on_windows_uses_localappdata(tmp_path, monkeypatch):
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    assert vad._cache_dir() == tmp_path / "nemoscribe"
+
+
+def test_cache_dir_xdg_wins_even_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", "C:/should/not/be/used")
+
+    assert vad._cache_dir() == tmp_path / "nemoscribe"
+
+
+def test_cache_dir_falls_back_to_home_cache(monkeypatch):
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+
+    assert vad._cache_dir() == Path.home() / ".cache" / "nemoscribe"

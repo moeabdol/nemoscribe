@@ -1,6 +1,7 @@
 """Tests for nemoscribe.cli"""
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -34,9 +35,11 @@ class PolyglotFakeTranscriber:
         pass
 
     def transcribe(self, _, *, language="en-US"):
-        mk = lambda text, lang: TranscriptEvent(
-            text=text, start=0.0, end=1.0, language=lang, source=""
-        )
+        def mk(text, lang):
+            return TranscriptEvent(
+                text=text, start=0.0, end=1.0, language=lang, source=""
+            )
+
         return [
             mk("مرحبا", "ar-AR"),
             mk("سلام", "ar-AR"),
@@ -270,7 +273,7 @@ def test_stream_system_and_file_sources_merge(tmp_path, monkeypatch, make_tone_w
     assert main(["stream", "system:them", "file=clip.wav"]) == 0
 
     stem = next(tmp_path.glob("stream-*.jsonl"))
-    sources = {json.loads(l)["source"] for l in stem.read_text().splitlines()}
+    sources = {json.loads(line)["source"] for line in stem.read_text().splitlines()}
     assert sources == {"them", "clip"}
 
 
@@ -296,3 +299,22 @@ def test_stream_system_source_setup_failure_exits_2(monkeypatch, capsys):
 
     assert main(["stream", "system"]) == 2
     assert "no default sink" in capsys.readouterr().err
+
+
+def test_cli_quiets_hf_by_default(monkeypatch):
+    monkeypatch.delenv("TRANSFORMERS_VERBOSITY", raising=False)
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", ExplodingTranscriber)
+
+    main(["transcribe", "nope.wav"])
+
+    assert os.environ["TRANSFORMERS_VERBOSITY"] == "error"
+    assert os.environ["HF_HUB_VERBOSITY"] == "error"
+
+
+def test_cli_respects_user_verbosity_override(monkeypatch):
+    monkeypatch.setenv("TRANSFORMERS_VERBOSITY", "info")
+    monkeypatch.setattr("nemoscribe.engine.Transcriber", ExplodingTranscriber)
+
+    main(["transcribe", "nope.wav"])
+
+    assert os.environ["TRANSFORMERS_VERBOSITY"] == "info"

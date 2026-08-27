@@ -1,6 +1,7 @@
 """Command-line interface — the only module that talks to the terminal."""
 
 import argparse
+import os
 import sys
 import time
 from collections import Counter
@@ -10,6 +11,10 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    # the CLI owns the terminal: HF libraries speak only when something is wrong
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_VERBOSITY", "error")
+
     parser = argparse.ArgumentParser(
         prog="nemoscribe",
         description="Multi-lingual transcriber built on Nemotron 3.5 ASR.",
@@ -151,6 +156,7 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
     status = 0
     for path in args.files:
+        print(f"{path}: transcribing...", file=sys.stderr)
         try:
             audio = load(path)
             t0 = time.perf_counter()
@@ -211,7 +217,7 @@ def _cmd_stream(args: argparse.Namespace) -> int:
     else:
         stem = Path(f"stream-{datetime.now():%y%m%d-%H%M%S}")  # noqa: DTZ005 - local label
 
-    print("loading model...", file=sys.stderr)
+    print("Loading model...", file=sys.stderr)
     try:
         transcriber = Transcriber(device=args.device)
     except EngineError as e:
@@ -278,6 +284,9 @@ def _cmd_stream(args: argparse.Namespace) -> int:
 
     for th in feeders:
         th.start()
+    live = any(kind in ("mic", "system") for kind, _, _ in parsed)
+    print("listening (Ctrl-C to stop)" if live else "transcribing...", file=sys.stderr)
+
     try:
         for th in feeders:
             th.join()  # file sources end on their own
